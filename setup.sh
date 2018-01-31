@@ -79,8 +79,12 @@ apt-get -o Acquire::ForceIPv4=true update && apt-get upgrade -y
 debconf-set-selections <<< "postfix postfix/mailname string ${VPNHOST}"
 debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
 
-apt-get install -y language-pack-en strongswan strongswan-ikev2 libstrongswan-standard-plugins strongswan-libcharon libcharon-standard-plugins libcharon-extra-plugins moreutils iptables-persistent postfix mailutils unattended-upgrades certbot
-
+# Debian stretch does not have language-pack-en nor libcharon-standard-plugins,
+# so skipping language-pack-en, and installing libcharon-extra-plugins because
+# this package includes everything ubuntu 17.04's libcharon-standard-plugins.
+# Also adding uuid-runtime, this is required for generating the .mobileconfig
+#apt-get install -y language-pack-en strongswan strongswan-ikev2 libstrongswan-standard-plugins strongswan-libcharon libcharon-standard-plugins libcharon-extra-plugins moreutils iptables-persistent postfix mailutils unattended-upgrades certbot
+apt-get install -y strongswan strongswan-ikev2 libstrongswan-standard-plugins strongswan-libcharon libcharon-extra-plugins moreutils iptables-persistent postfix mailutils unattended-upgrades certbot uuid-runtime
 
 ETH0ORSIMILAR=$(ip route get 8.8.8.8 | awk -- '{printf $5}')
 IP=$(ifdata -pa $ETH0ORSIMILAR)
@@ -179,12 +183,15 @@ ln -f -s /etc/letsencrypt/live/$VPNHOST/cert.pem    /etc/ipsec.d/certs/cert.pem
 ln -f -s /etc/letsencrypt/live/$VPNHOST/privkey.pem /etc/ipsec.d/private/privkey.pem
 ln -f -s /etc/letsencrypt/live/$VPNHOST/chain.pem   /etc/ipsec.d/cacerts/chain.pem
 
+# Debian Stretch does not come with apparmor enabled by default, so echoing this config does not hurt anything, but we're not
+# restarting apparmor in the next step since it's not installed by default.
+
 grep -Fq 'jawj/IKEv2-setup' /etc/apparmor.d/local/usr.lib.ipsec.charon || echo "
 # https://github.com/jawj/IKEv2-setup
 /etc/letsencrypt/archive/${VPNHOST}/* r,
 " >> /etc/apparmor.d/local/usr.lib.ipsec.charon
 
-aa-status --enabled && invoke-rc.d apparmor reload
+#aa-status --enabled && invoke-rc.d apparmor reload
 
 
 echo
@@ -247,6 +254,16 @@ echo "${VPNHOST} : RSA \"privkey.pem\"
 ${VPNUSERNAME} %any : EAP \""${VPNPASSWORD}"\"
 " > /etc/ipsec.secrets
 
+# Additions: enable eap-identity and eap-mschapv2 charon extensions
+
+sed -r \
+-e 's/load = no/load = yes/' \
+-i.original /etc/strongswan.d/charon/eap-identity.conf
+
+sed -r \
+-e 's/load = no/load = yes/' \
+-i.original /etc/strongswan.d/charon/eap-mschapv2.conf
+
 ipsec restart
 
 
@@ -256,7 +273,8 @@ echo "--- User ---"
 echo
 
 # user + SSH
-
+# Skipping this one.
+: '
 id -u $LOGINUSERNAME &>/dev/null || adduser --disabled-password --gecos "" $LOGINUSERNAME
 echo "${LOGINUSERNAME}:${LOGINPASSWORD}" | chpasswd
 adduser ${LOGINUSERNAME} sudo
@@ -277,20 +295,26 @@ UseDNS no" >> /etc/ssh/sshd_config
 
 service ssh restart
 
+'
 
 echo
 echo "--- Timezone, mail, unattended upgrades ---"
 echo
 
+# Skip tz and locale
+
+:'
+
 timedatectl set-timezone $TZONE
 /usr/sbin/update-locale LANG=en_GB.UTF-8
-
+'
 
 sed -r \
 -e "s/^myhostname =.*$/myhostname = ${VPNHOST}/" \
 -e 's/^inet_interfaces =.*$/inet_interfaces = loopback-only/' \
 -i.original /etc/postfix/main.cf
 
+# XXX: Mine had my user as an alias to root already, so a duplicate warning was emitted when running newaliases. Fixed this by hand.
 grep -Fq 'jawj/IKEv2-setup' /etc/aliases || echo "
 # https://github.com/jawj/IKEv2-setup
 root: ${EMAIL}
@@ -300,11 +324,18 @@ ${LOGINUSERNAME}: ${EMAIL}
 newaliases
 service postfix restart
 
+# Not going to let this automatically reboot, wtf
+#sed -r \
+#-e 's|^//Unattended-Upgrade::MinimalSteps "true";$|Unattended-Upgrade::MinimalSteps "true";|' \
+#-e 's|^//Unattended-Upgrade::Mail "root";$|Unattended-Upgrade::Mail "root";|' \
+#-e 's|^//Unattended-Upgrade::Automatic-Reboot "false";$|Unattended-Upgrade::Automatic-Reboot "true";|' \
+#-e 's|^//Unattended-Upgrade::Remove-Unused-Dependencies "false";|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' \
+#-e 's|^//Unattended-Upgrade::Automatic-Reboot-Time "02:00";$|Unattended-Upgrade::Automatic-Reboot-Time "03:00";|' \
+#-i /etc/apt/apt.conf.d/50unattended-upgrades
 
 sed -r \
 -e 's|^//Unattended-Upgrade::MinimalSteps "true";$|Unattended-Upgrade::MinimalSteps "true";|' \
 -e 's|^//Unattended-Upgrade::Mail "root";$|Unattended-Upgrade::Mail "root";|' \
--e 's|^//Unattended-Upgrade::Automatic-Reboot "false";$|Unattended-Upgrade::Automatic-Reboot "true";|' \
 -e 's|^//Unattended-Upgrade::Remove-Unused-Dependencies "false";|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' \
 -e 's|^//Unattended-Upgrade::Automatic-Reboot-Time "02:00";$|Unattended-Upgrade::Automatic-Reboot-Time "03:00";|' \
 -i /etc/apt/apt.conf.d/50unattended-upgrades
